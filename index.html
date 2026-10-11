@@ -371,7 +371,7 @@ window.CHAR_ORDER = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"
 'use strict';
 var KEY = 'homingle-model-v2';
 var DAY = 86400000, HOUR = 3600000, MIN = 60000, SEC = 1000;
-var EB_DAYS = 12;                       // a new room or profile is Early Bird for this many days
+var EB_DAYS = 7;                        // a new room or profile is Early Bird for this many days (a setting: every sentence reads it from here)
 var SCREENS = {}, OVERLAYS = {}, A = {}; // screen renderers, overlay renderers, actions
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -413,6 +413,37 @@ function save() {
 function saveNow() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
 function wipe() { try { localStorage.removeItem(KEY); } catch (e) {} S = fresh(); applyWorld(); }
 
+// ---------- typed text: no phone numbers, links or exact addresses where other people read it ----------
+// 'all' = phone, link and address; 'phone' = phone and link only (the address field itself)
+var GUARD = { 'me.job': 'all', 'me.work': 'all', 'me.about': 'all', 'listing.draft.near': 'all', 'listing.draft.desc': 'all', 'listing.draft.more': 'all', 'listing.draft.addr': 'phone', 'tmp.mate.name': 'all', 'tmp.mate.job': 'all', 'tmp.mate.line': 'all', 'tmp.intro': 'all' };
+var LEAK_TX = { phone: 'Phone numbers cannot be written here. They are shared when a visit is confirmed, or earlier if you both agree in the chat.', link: 'Links, e-mail addresses and handles cannot be written here.', address: 'An exact address cannot be written here. It is shared when a visit is confirmed.' };
+var NUMWORD = { zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+function leakSpans(text) {
+  var t = String(text == null ? '' : text), out = [], m, re;
+  // a run of digits or spelled-out digits, with spaces, dashes or dots between them, that holds a mobile number
+  re = /(?:(?:\d|\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|double|triple)\b)[\s\-.()\/_*+]{0,3}){8,}/gi;
+  while ((m = re.exec(t))) {
+    var dg = '', rep2 = 1;
+    m[0].replace(/\d|[a-z]+/gi, function (w) { var lw = w.toLowerCase(); if (lw === 'double') { rep2 = 2; return ''; } if (lw === 'triple') { rep2 = 3; return ''; } var one = /\d/.test(w) ? w : (NUMWORD[lw] || ''); for (var i = 0; i < rep2; i++) dg += one; rep2 = 1; return ''; });
+    if (/[6-9]\d{9}/.test(dg)) out.push([m.index, m.index + m[0].length, 'phone']);
+  }
+  [[/(?:https?:\/\/|www\.)\S+/gi, 'link'], [/\b(?:wa|t)\.me\/\S*/gi, 'link'], [/\b[a-z0-9][a-z0-9\-]*\.(?:com|net|org|io|co\.in)\b(?:\/\S*)?/gi, 'link'], [/\S+@\S+\.\S+/g, 'link'], [/(?:^|\s)@[a-z0-9_.]{3,}/gi, 'link'],
+   [/\b(?:flat|house|door|plot|apt|apartment|villa|h\.?\s?no|d\.?\s?no)\s*(?:no\.?|number|num)?\s*[:#\-]?\s*\d+[a-z]?\b/gi, 'address'], [/#\s?\d{1,4}\b/g, 'address'], [/\b\d{1,4}[a-z]?\s*,\s*\d{1,2}(?:st|nd|rd|th)\s+(?:cross|main|block|stage|street|road)\b/gi, 'address'], [/\b56\d{4}\b/g, 'address'], [/\bpin\s*(?:code)?\s*[:\-]?\s*\d{6}\b/gi, 'address']
+  ].forEach(function (x) { x[0].lastIndex = 0; while ((m = x[0].exec(t))) { out.push([m.index, m.index + m[0].length, x[1]]); if (!m[0].length) x[0].lastIndex++; } });
+  return out;
+}
+function leakKinds(text, mode) { var k = []; leakSpans(text).forEach(function (s) { if (mode === 'phone' && s[2] === 'address') return; if (k.indexOf(s[2]) < 0) k.push(s[2]); }); return k; }
+function leakOf(text, mode) { return leakKinds(text, mode)[0] || null; }
+function scrubText(text, mode) {
+  var t = String(text == null ? '' : text), sp = leakSpans(t).filter(function (s) { return !(mode === 'phone' && s[2] === 'address'); }).sort(function (a, b) { return b[0] - a[0]; });
+  sp.forEach(function (s) { t = t.slice(0, s[0]) + ' ' + t.slice(s[1]); });
+  return t.replace(/[ \t]{2,}/g, ' ').replace(/ ([.,;!?])/g, '$1').trim();
+}
+function leakNote(path) { var k = GUARD[path] ? leakOf(getPath(path), GUARD[path]) : null; return k ? '<span class="errtx">' + LEAK_TX[k] + '</span>' : ''; }
+function leakOnScreen() { var els = document.querySelectorAll('[data-bind]'); for (var i = 0; i < els.length; i++) { var md = GUARD[els[i].dataset.bind]; if (md) { var k = leakOf(els[i].value, md); if (k) return k; } } return null; }
+// if someone leaves a screen with such text still in a field, it is taken out before anyone else can see it
+function scrubGuarded() { var hit = null; for (var p in GUARD) { var v = getPath(p); if (typeof v === 'string' && v) { var k = leakOf(v, GUARD[p]); if (k) { setPath(p, scrubText(v, GUARD[p])); hit = hit || k; } } } if (hit) logEvent('m', 'scrubbed_' + hit); return hit; }
+var SCRUB_TX = { phone: 'A phone number was removed from what you wrote', link: 'A link was removed from what you wrote', address: 'An exact address was removed from what you wrote' };
 function getPath(path) { var o = S; path.split('.').forEach(function (k) { o = o == null ? o : o[k]; }); return o; }
 function setPath(path, val) {
   var ks = path.split('.'), o = S;
@@ -503,7 +534,15 @@ function backTo(name) {   // pop until a screen of this name is on top; if absen
   home(name);
 }
 function openOv(name, p) { OV = { n: name, p: p || {} }; logEvent('o', name); renderOv(); }
-function closeOv() { OV = null; renderOv(); }
+function closeOv() { var k = scrubGuarded(); OV = null; renderOv(); if (k) toast(SCRUB_TX[k]); }
+var SAFE_ACT = { back: 1, close: 1, set: 1, flip: 1, multi: 1, step: 1, toast: 1 };
+(function () {   // every way of leaving a screen passes through the scrub
+  var g = go, b = back, h = home, bt = backTo;
+  go = function (n, p) { var k = scrubGuarded(); g(n, p); if (k) toast(SCRUB_TX[k]); };
+  back = function () { var k = scrubGuarded(); b(); if (k) toast(SCRUB_TX[k]); };
+  home = function (n, p) { var k = scrubGuarded(); h(n, p); if (k) toast(SCRUB_TX[k]); };
+  backTo = function (n) { var k = scrubGuarded(); bt(n); if (k) toast(SCRUB_TX[k]); };
+})();
 
 // Re-drawing the same screen changes only what is different, so nothing flickers, a field keeps its focus and caret,
 // side-scrolled rows stay where they are, photos are not reloaded and an open sheet does not slide in again.
@@ -588,7 +627,7 @@ function boot() {
     var t = ev.target.closest('[data-a]'); if (!t) { if (ev.target.id === 'overlay' && OV && !OV.p.modal) closeOv(); return; }
     if (t.disabled) return;
     var d = t.dataset, fn = A[d.a];
-    if (fn) { ev.preventDefault(); fn(d, t, ev); }
+    if (fn) { ev.preventDefault(); if (!SAFE_ACT[d.a]) { var lk = leakOnScreen(); if (lk) { toast(LEAK_TX[lk].split('. ')[0] + '.'); render(); return; } } fn(d, t, ev); }
   });
   document.addEventListener('input', function (ev) {
     var t = ev.target, b = t.dataset && t.dataset.bind; if (!b) return;
@@ -713,13 +752,13 @@ function chips(path, opts, o) {
 }
 function group(legend, inner, note) { return '<fieldset><legend>' + legend + '</legend><div class="wrap">' + inner + '</div>' + (note ? '<p class="cap" style="margin-top: 8px">' + note + '</p>' : '') + '</fieldset>'; }
 function field(id, label, path, ph, o) {
-  o = o || {}; var v = getPath(path);
+  o = o || {}; var v = getPath(path), lk = GUARD[path] ? leakOf(v, GUARD[path]) : null; if (lk && !o.err) { o = Object.assign({}, o); o.err = LEAK_TX[lk]; }
   return '<div class="fld"><label class="label" for="' + id + '">' + label + '</label><input class="inp' + (o.err ? ' err' : '') + '" id="' + id + '" type="' + (o.type || 'text') + '"' + (o.mode ? ' inputmode="' + o.mode + '"' : '') + (o.max ? ' maxlength="' + o.max + '"' : '')
     + ' placeholder="' + esc(ph || '') + '" value="' + esc(v == null ? '' : v) + '" data-bind="' + path + '"' + (o.live ? ' data-live' : '') + ' autocomplete="off">' + (o.err ? '<span class="errtx">' + o.err + '</span>' : '') + (o.note ? '<p class="cap">' + o.note + '</p>' : '') + '</div>';
 }
 function area(id, label, path, ph, note) {
-  var v = getPath(path);
-  return '<div class="fld"><label class="label" for="' + id + '">' + label + '</label><textarea class="inp" id="' + id + '" placeholder="' + esc(ph || '') + '" data-bind="' + path + '">' + esc(v == null ? '' : v) + '</textarea>' + (note ? '<p class="cap">' + note + '</p>' : '') + '</div>';
+  var v = getPath(path), lk = GUARD[path] ? leakOf(v, GUARD[path]) : null;
+  return '<div class="fld"><label class="label" for="' + id + '">' + label + '</label><textarea class="inp' + (lk ? ' err' : '') + '" id="' + id + '" placeholder="' + esc(ph || '') + '" data-bind="' + path + '">' + esc(v == null ? '' : v) + '</textarea>' + (lk ? '<span class="errtx">' + LEAK_TX[lk] + '</span>' : '') + (note ? '<p class="cap">' + note + '</p>' : '') + '</div>';
 }
 function sec(title, inner, right) { return '<section class="col gap10"><div class="rowx" style="justify-content: space-between"><h2 class="h2">' + title + '</h2>' + (right || '') + '</div>' + inner + '</section>'; }
 function tiles(items) { return '<div class="two" style="gap: 8px">' + items.map(function (x) { return '<div class="tile"><span class="cap">' + x[0] + '</span><b>' + esc(x[1]) + '</b></div>'; }).join('') + '</div>'; }
@@ -831,15 +870,15 @@ var ROOMS = {};
   RM({ id: 'meera', lister: 'meera', area: 'HSR Layout', flat: '3BHK', floor: '2nd floor', baths: 2, room: 'Private room', bath: 'Attached', furn: 'Furnished', rent: 12000, bills: 'Split between flatmates', fromIn: 23, minStay: '6 months', notice: '1 month',
        near: 'HSR Layout metro', walk: '5 to 10 min walk', amen: ['Wi-Fi', 'Washing machine', 'Power backup', 'Hot water'], kitchen: 'Vegetarian only', guests: 'With notice', smoking: 'Not allowed', pets: 'No pets',
        gender: 'Anyone', who: 'Working people', desc: 'A sunny room with an attached bathroom in a calm, tidy flat. The metro is a short walk away.', photos: ['sunlit', 'green_lounge', 'compact_kitchen'],
-       age: 10, respond: 25, mates: [{ name: 'Ritu', age: 28, job: 'Doctor', line: 'Works shifts and sleeps odd hours.', tags: ['Works shifts', 'Vegetarian'] }] }),
+       age: 4, respond: 25, mates: [{ name: 'Ritu', age: 28, job: 'Doctor', line: 'Works shifts and sleeps odd hours.', tags: ['Works shifts', 'Vegetarian'] }] }),
   RM({ id: 'kiran', lister: 'kiran', area: 'Koramangala', flat: '3BHK', floor: '3rd floor', baths: 2, room: 'Private room', bath: 'Shared', furn: 'Furnished', rent: 13500, bills: 'Split between flatmates', fromIn: 7, minStay: '6 months', notice: '1 month',
        near: 'Koramangala Club', walk: '5 to 10 min walk', amen: ['Wi-Fi', 'Washing machine', 'Lift', 'Two-wheeler parking', 'Hot water', 'Fridge'], kitchen: 'Anything', guests: 'Fine', smoking: 'Outside only', pets: 'No pets',
        gender: 'Anyone', who: 'Working people', desc: 'A furnished room in a lively flat near Koramangala Club. Friends come over on Saturdays.', photos: ['white_sofa', 'island_kitchen', 'green_bed'],
-       age: 6, feat: -1, boost: 2, respond: 35, mates: [{ name: 'Tarun', age: 29, job: 'Photographer', line: 'Out on shoots most days.', tags: ['Night owl'] }] }),
+       age: 5.5, feat: -0.4, boost: 2, respond: 35, mates: [{ name: 'Tarun', age: 29, job: 'Photographer', line: 'Out on shoots most days.', tags: ['Night owl'] }] }),
   RM({ id: 'priya', lister: 'priya', area: 'BTM Layout', flat: '2BHK', floor: 'Ground floor', baths: 1, room: 'Private room', bath: 'Shared', furn: 'Semi-furnished', rent: 11000, bills: 'Split between flatmates', fromIn: 7, minStay: '6 months', notice: '1 month',
        near: 'Silk Board', walk: 'Under 5 min walk', amen: ['Wi-Fi', 'Washing machine', 'Two-wheeler parking', 'Hot water'], kitchen: 'Eggs are fine', guests: 'With notice', smoking: 'Not allowed', pets: 'No pets',
        gender: 'Anyone', who: 'Working people', desc: 'A quiet room facing the park, with a shared bathroom. Five minutes from the Silk Board junction.', photos: ['wood_bed', 'compact_kitchen', 'garden'],
-       age: 8, respond: 35, mates: [] }),
+       age: 4.5, respond: 35, mates: [] }),
   RM({ id: 'dev', lister: 'dev', area: 'BTM Layout', flat: '3BHK', floor: '3rd floor', baths: 2, room: 'Private room', bath: 'Shared', furn: 'Furnished', rent: 11500, bills: 'Split between flatmates', fromIn: 12, minStay: '6 months', notice: '1 month',
        near: 'Udupi Garden', walk: '5 to 10 min walk', amen: ['Wi-Fi', 'Washing machine', 'Two-wheeler parking', 'Hot water', 'Cook'], kitchen: 'Vegetarian only', guests: 'With notice', smoking: 'Not allowed', pets: 'No pets',
        gender: 'Men only', who: 'Working people', desc: 'A furnished room with a study table and a window onto the lane. The bathroom is shared with one flatmate.', photos: ['linen_bed', 'oak_kitchen', 'building'],
@@ -926,8 +965,8 @@ var GEN_ROOMS = [], GEN_SEEKERS = [];
   var HAND = {}; Object.keys(ROOMS).forEach(function (id) { var r0 = ROOMS[id]; (HAND[r0.area] = HAND[r0.area] || {})[r0.photos[0]] = 1; });
   function coverSet(area, si, ai, living, kitchen) { var bed = BEDS[(si + ai * 5) % BEDS.length]; return (HAND[area] || {})[bed] ? [living, bed + '~', kitchen] : [bed, living, kitchen]; }
   var WALKS = ['Under 5 min walk', '5 to 10 min walk', '10 to 20 min walk'], WALK_TX = { 'Under 5 min walk': 'under five minutes away', '5 to 10 min walk': 'a ten-minute walk away', '10 to 20 min walk': 'about fifteen minutes on foot' };
-  // twelve rooms an area: two Featured, six Early Bird at different ages (one boosted, one whose Featured has ended), four older than 12 days
-  var SLOTS = [{ age: [2, 7], feat: [1.2, 4] }, { age: [0.2, 2] }, { age: [2, 5], boost: [1, 2.5] }, { age: [5, 9] }, { age: [9, 11.3] }, { age: [13, 18] }, { age: [15, 24] }, { age: [4, 8], feat: [-3, -1] }, { age: [0.5, 4], feat: [2, 4.5] }, { age: [1, 6] }, { age: [12.5, 16], boost: [0.5, 2] }, { age: [17, 23] }];
+  // twelve rooms an area: two Featured, six Early Bird at different ages (one boosted, one whose Featured has ended), four older than the wait
+  var SLOTS = [{ age: [2, 6], feat: [1.2, 4] }, { age: [0.2, 1.5] }, { age: [1.5, 3.5], boost: [1, 2.5] }, { age: [3, 5] }, { age: [5, 6.5] }, { age: [8, 12] }, { age: [10, 18] }, { age: [5.2, 6.4], feat: [-1.3, -0.2] }, { age: [0.5, 4], feat: [2, 4.5] }, { age: [1, 4.5] }, { age: [7.5, 11], boost: [0.5, 2] }, { age: [12, 20] }];
   var n = 0;
   AREAS.forEach(function (area, ai) {
     var qs = shuffle([0.5, 0.58, 0.64, 0.7, 0.76, 0.82, 0.88, 0.94, 1.0, 1.08, 1.18, 1.3]), nears = shuffle(AREA_INFO[area].near);
@@ -958,7 +997,7 @@ var GEN_ROOMS = [], GEN_SEEKERS = [];
   // twenty more people looking: about a third have a pass, and they joined at different times
   var INTROS = ['I work close by and can visit any evening this week.', 'Your flat looks like a good fit. Is the room still free?', 'I am moving for a new job and would love to see the room.', 'I am tidy, quiet and can move at short notice.', 'Could I come by this weekend?'];
   for (var i = 1; i <= 20; i++) {
-    var g = i % 2 ? 'Female' : 'Male', sp = person('y', i, g, { joined: rf(0.3, 22), movein: R() < 0.55 ? 'This month' : 'Next month' });
+    var g = i % 2 ? 'Female' : 'Male', sp = person('y', i, g, { joined: rf(0.3, 13), movein: R() < 0.55 ? 'This month' : 'Next month' });
     if (R() < 0.35) sp.pass = true; if (R() < 0.45) sp.intro = pk(INTROS);
     if (i % 5 === 0) { sp.job = 'Student'; sp.age = Math.min(sp.age, 24); sp.about = 'I am a student. ' + sp.about.split('. ').slice(1).join('. '); sp.line = 'Student. ' + sp.line.split('. ').slice(1).join('. '); }
     GEN_SEEKERS.push(sp.id);
@@ -982,7 +1021,7 @@ var ROOM_ORDER = ['anjali', 'joseph', 'arjun', 'nandini', 'harpreet', 'zoya', 'm
 
 
 var PLANS = [{ id: 'd1', name: '1 day', days: 1, price: 99 }, { id: 'd7', name: '7 days', days: 7, price: 399 }, { id: 'd14', name: '14 days', days: 14, price: 699 }, { id: 'd30', name: '30 days', days: 30, price: 1299 }];
-var BOOST = { price: 200, days: 3 }, FEATURED = { price: 500, days: 5 }, LISTING_DAYS = 27;
+var BOOST = { price: 200, days: 3 }, FEATURED = { price: 500, days: 5 }, LISTING_DAYS = 27, NEXT_DAYS = 30;
 
 var APPLICANT_ORDER = ['kavya', 'rahul', 'tanvi', 'divya', 'aman', 'pooja'].concat(GEN_SEEKERS.slice(0, 8));   // the order they find a new listing
 var FEED_PEOPLE = ['sneha', 'aditi', 'ishita', 'farhan', 'rohan', 'nikhil'].concat(GEN_SEEKERS.slice(8));
@@ -1302,12 +1341,12 @@ EV.greet = function (p) {      // the other person speaks first if the tester ha
   c.stage = Math.max(c.stage, 1); EV.botmsg({ cid: c.id, text: text });
 };
 EV.numReq = function (p) {
-  var c = S.chats[p.cid]; if (!c || c.num !== 'none') return;
+  var c = S.chats[p.cid]; if (!c || c.num !== 'none' || chatState(c).state !== 'open') return;
   c.num = 'them'; var o = chatOther(c);
   addMsg(c, 'sys', o.name + ' would like to share phone numbers.', 'numreq', { icon: 'phone' });
   notify(c.side, 'phone', o.name + ' would like to share phone numbers.', 'PopNumberRequest', { cid: c.id }, true);
 };
-EV.numOk = function (p) { var c = S.chats[p.cid]; if (!c || c.num !== 'me') return; shareNumbers(c, chatOther(c).name + ' agreed. You can now see each other&#39;s phone numbers.'); };
+EV.numOk = function (p) { var c = S.chats[p.cid]; if (!c || c.num !== 'me') return; if (chatState(c).state !== 'open') { (c.held = c.held || []).push({ type: 'numOk', p: p }); return; } shareNumbers(c, chatOther(c).name + ' agreed. You can now see each other&#39;s phone numbers.'); };
 
 // ---------- visits ----------
 function confirmVisit(c, at, byThem) {
@@ -1410,7 +1449,7 @@ function clockChecks() {
     var e = myEnds();
     if (!l.expired && e - n < 2 * DAY && e > n && once('listEnding' + e)) { notify('lister', 'home', 'Your listing ends ' + endsIn(e) + '.', 'PopListingEnding', {}, true); ch = true; }
     if (!l.expired && e <= n) { l.expired = true; EVT_AT = e; notify('lister', 'home', 'Your listing has ended and is hidden. You can renew it.', 'ListerHome', {}); EVT_AT = null; ch = true; }
-    if (!l.ebDone && n >= myEb()) { l.ebDone = true; if (Object.keys(S.listing.applicants).length) { EVT_AT = myEb(); notify('lister', 'chat', 'Your listing is 12 days old. Chat is now free with everyone who applied and you accept.', 'Applicants', {}); EVT_AT = null; } ch = true; }
+    if (!l.ebDone && n >= myEb()) { l.ebDone = true; if (Object.keys(S.listing.applicants).length) { EVT_AT = myEb(); notify('lister', 'chat', 'Your listing is ' + EB_DAYS + ' days old. Chat is now free with everyone who applied and you accept.', 'Applicants', {}); EVT_AT = null; } ch = true; }
   }
   // chats that open or pause because a date passed, a pass ended or Featured ended
   for (var k in S.chats) {
@@ -1809,9 +1848,9 @@ SCREENS.Filters = function () {
 };
 A.resetFilters = function () { var s = S.filters.sort; S.filters = fresh().filters; S.filters.sort = s; render(); };
 OVERLAYS.PopEarlyBird = function () {
-  return sheet('How Early Bird works', '', ul([li('A new room is Early Bird for its first 12 days.', 'clock'), li('Sending interest is free on every room, from the first day.'),
+  return sheet('How Early Bird works', '', ul([li('A new room is Early Bird for its first ' + EB_DAYS + ' days.', 'clock'), li('Sending interest is free on every room, from the first day.'),
     li('If the lister accepts, chat opens on the date shown on the room. From then on it is free.'), li('It opens sooner if either of you has paid: you with a pass, or the lister by going Featured.'),
-    li('When a lister invites you, the same 12 days are counted on your profile instead.', 'users'), li('Promoted only means the lister paid for a better place in the feed. It does not change when chat opens.', 'up'),
+    li('When a lister invites you, the same ' + EB_DAYS + ' days are counted on your profile instead.', 'users'), li('Promoted only means the lister paid for a better place in the feed. It does not change when chat opens.', 'up'),
     li('Rooms tagged Free to chat, and rooms with no tag, open the moment the lister accepts.', 'chat')]) + btn('Got it', 'close'));
 };
 
@@ -1829,7 +1868,7 @@ function chatNote(r) {
   if (inv && inv.state !== 'declined') {
     if (roomFeatured(r)) return banner('chat', 'Free to chat. Chat opens as soon as you accept.');
     if (now() >= myEbDate()) return banner('chat', 'Chat is free. It opens as soon as you accept.');
-    return '<div class="card col gap4" style="padding: 14px 16px"><div class="hint" style="color: var(--fg)"><span class="mut">' + ic('clock', 18) + '</span><span class="s14"><strong>Chat opens on ' + dLong(myEbDate()) + '.</strong> When a lister invites you, the 12 days are counted on your profile, and yours is new. Accepting is free. Chat opens sooner if you get a pass or ' + p.name + ' goes Featured.</span></div><div style="padding-left: 28px">' + lnk('How Early Bird works', 'open', { to: 'PopEarlyBird' }, 'left s') + '</div></div>';
+    return '<div class="card col gap4" style="padding: 14px 16px"><div class="hint" style="color: var(--fg)"><span class="mut">' + ic('clock', 18) + '</span><span class="s14"><strong>Chat opens on ' + dLong(myEbDate()) + '.</strong> When a lister invites you, the ' + EB_DAYS + ' days are counted on your profile, and yours is new. Accepting is free. Chat opens sooner if you get a pass or ' + p.name + ' goes Featured.</span></div><div style="padding-left: 28px">' + lnk('How Early Bird works', 'open', { to: 'PopEarlyBird' }, 'left s') + '</div></div>';
   }
   if (t === 'free') return banner('chat', 'Free to chat. Chat opens as soon as ' + p.name + ' accepts your interest.');
   if (t) return '<div class="card col gap4" style="padding: 14px 16px"><div class="hint" style="color: var(--fg)"><span class="mut">' + ic('clock', 18) + '</span><span class="s14"><strong>Early Bird until ' + dLong(t.early) + '.</strong> This room is new. Sending interest is free. If ' + p.name + ' accepts, chat opens on ' + dLong(t.early) + ', or sooner if you get a pass or ' + p.name + ' goes Featured.</span></div><div style="padding-left: 28px">' + lnk('How Early Bird works', 'open', { to: 'PopEarlyBird' }, 'left s') + '</div></div>';
@@ -1867,7 +1906,7 @@ SCREENS.Listing = function (pr) {
       + sec('Looking for', '<div class="wrap">' + ichip(r.gender) + ichip(r.who) + '</div>')
       + sec('How you match', matchBlock(m, p.name, r.id))
       + sec('House rules', ul(rules))
-      + '<p class="cap s13">The exact address is shared only when a visit is confirmed. Phone numbers are shared then too, or earlier if you both agree.</p>'
+      + '<p class="cap s13">Once you are chatting you can agree a visit. The exact address and phone numbers are shared when the visit is confirmed, or earlier if you both agree.</p>'
       + lnk(ic('flag', 18) + '&nbsp;Report this listing', 'go', { to: 'ReportBlock', rid: r.id }, 'left s mut'), '', 'gap: 20px; padding: 16px 16px 20px'),
     foot(footer, 'wide'));
 };
@@ -1927,7 +1966,7 @@ function sendInterest(rid, intro) {
 SCREENS.SendInterest = function (pr) {
   var r = ROOMS[pr.rid], p = PEOPLE[r.lister], m = matchRoom(r.id), t = roomTag(r), P2 = her(p);
   var note = passOn() ? '' : t === 'free' ? banner('chat', P2.charAt(0).toUpperCase() + P2.slice(1) + ' room is Free to chat, so chat opens as soon as ' + pron(p).toLowerCase() + ' accepts.') : t ? hint('clock', 'This room is Early Bird. If ' + p.name + ' accepts, chat opens on ' + dLong(t.early) + '.') : banner('chat', 'Chat is free on this room. It opens as soon as ' + p.name + ' accepts.');
-  var intro = passOn() ? '<div class="fld"><div class="rowx" style="justify-content: space-between"><label class="label" for="intro">Intro message</label>' + pill('Included with your pass', '', 'check') + '</div><textarea class="inp" id="intro" style="min-height: 110px" placeholder="A short note ' + p.name + ' reads before anything else." data-bind="tmp.intro">' + esc(S.tmp.intro || '') + '</textarea>' + cap('One message. You have a pass, so chat opens as soon as ' + p.name + ' accepts.') + '</div>' : '';
+  var intro = passOn() ? '<div class="fld"><div class="rowx" style="justify-content: space-between"><label class="label" for="intro">Intro message</label>' + pill('Included with your pass', '', 'check') + '</div><textarea class="inp" id="intro" style="min-height: 110px" placeholder="A short note ' + p.name + ' reads before anything else." data-bind="tmp.intro">' + esc(S.tmp.intro || '') + '</textarea>' + leakNote('tmp.intro') + cap('One message. You have a pass, so chat opens as soon as ' + p.name + ' accepts.') + '</div>' : '';
   return page('day', topbar('Send interest', '', 'x'), scroll(miniCard(r, r.area + ' · Listed by ' + p.name) + intro
     + sec('What ' + p.name + ' will see', ul([li('Your verified name, age and gender'), li('Your picture, your work and your lifestyle answers'), m ? li('Your match with ' + P2 + ' flat: ' + m.pct + '%') : li('Your lifestyle answers, once you add them')])) + note, 'wide'),
     foot(btn('Send interest', 'sendNow', { rid: r.id }) + cap('Free. ' + p.name + ' decides whether to accept.', 'center'), 'wide'));
@@ -1936,10 +1975,10 @@ A.sendNow = function (d) { sendInterest(d.rid, (S.tmp.intro || '').trim()); };
 SCREENS.InterestSent = function (pr) {
   var r = ROOMS[pr.rid], p = PEOPLE[r.lister], t = roomTag(r), P1 = pron(p), P2 = her(p);
   var s2 = passOn() ? ['If ' + P1.toLowerCase() + ' accepts, you can chat', 'You have a pass, so chat opens straight away.'] : t === 'free' ? ['If ' + P1.toLowerCase() + ' accepts, you can chat', P2.charAt(0).toUpperCase() + P2.slice(1) + ' room is Free to chat, so chat opens straight away.']
-    : t ? ['If ' + P1.toLowerCase() + ' accepts, chat opens on ' + dLong(t.early), P2.charAt(0).toUpperCase() + P2.slice(1) + ' room is new, so it is Early Bird until then.'] : ['If ' + P1.toLowerCase() + ' accepts, you can chat', P2.charAt(0).toUpperCase() + P2.slice(1) + ' room has been listed for more than 12 days, so chat is free.'];
+    : t ? ['If ' + P1.toLowerCase() + ' accepts, chat opens on ' + dLong(t.early), P2.charAt(0).toUpperCase() + P2.slice(1) + ' room is new, so it is Early Bird until then.'] : ['If ' + P1.toLowerCase() + ' accepts, you can chat', P2.charAt(0).toUpperCase() + P2.slice(1) + ' room has been listed for more than ' + EB_DAYS + ' days, so chat is free.'];
   var next = feedRooms().filter(function (x) { return x.id !== r.id && myRel(x.id) === 'none'; })[0];
   return page('day', scroll(bigicon('check') + head('Interest sent to ' + p.name, P1 + ' can now see your profile and how well you match.')
-    + steps([[p.name + ' reviews your profile', 'You will get a notification either way.'], s2, ['Agree on a visit', 'The exact address is shared only then.']])
+    + steps([[p.name + ' reviews your profile', 'You will get a notification either way.'], s2, ['Chat, then agree on a visit', 'The exact address is shared only then.']])
     + (next ? '<div class="col gap10" style="margin-top: 4px"><h2 class="sub">You might also like</h2>' + miniCard(next, next.area + (roomEarly(next) ? ' · Early Bird until ' + dShort(roomTag(next).early) : ' · ' + matesCount(next)), matchPill(next.id)) + '</div>' : ''), '', 'gap: 20px; padding-top: 88px'),
     foot(btn('See my interests', S.me.prefs.push === null ? 'go' : 'home', { to: S.me.prefs.push === null ? 'AskNotifications' : 'Interests' }) + btn('Keep browsing', 'home', { to: 'SeekerHome' }, 'sec')));
 };
@@ -1991,7 +2030,7 @@ OVERLAYS.PopDeclineInvite = function (pr) {
 A.declineInvite = function (d) { mile('invite_declined'); S.invites[d.rid].state = 'declined'; closeOv(); toast('Invite declined'); if (cur().n === 'Listing') back(); else render(); };
 SCREENS.InviteAccepted = function (pr) {
   var r = ROOMS[pr.rid], p = PEOPLE[r.lister], st = seekerChat(r.id);
-  return confirmPage('night', 'check', 'You and ' + p.name + ' are a match', 'Chat opens on ' + dLong(st.until || myEbDate()) + ', when your profile is 12 days old. It opens sooner if ' + p.name + ' goes Featured or you get a pass. You will find ' + herObj(p) + ' under Chats.',
+  return confirmPage('night', 'check', 'You and ' + p.name + ' are a match', 'Chat opens on ' + dLong(st.until || myEbDate()) + ', when your profile is ' + EB_DAYS + ' days old. It opens sooner if ' + p.name + ' goes Featured or you get a pass. You will find ' + herObj(p) + ' under Chats.',
     btn('Back to my interests', 'home', { to: 'Interests' }) + btn('Keep browsing', 'home', { to: 'SeekerHome' }, 'sec'));
 };
 SCREENS.Matched = function (pr) {
@@ -2112,15 +2151,15 @@ SCREENS.Chat = function (pr) {
   var body = '';
   var iWrote = c.msgs.some(function (m) { return m.f === 'me'; });
   if (!talked) body += sysMsg('heart', c.side === 'seeker' ? 'You matched with ' + o.name + '. ' + (open ? 'Say hello.' : '') : 'You and ' + o.name + ' are a match. ' + (open ? 'Say hello.' : ''));
-  if (c.num !== 'shared') body += sysMsg('phone', 'Phone numbers are shared when a visit is confirmed, or earlier if you both agree.');
+  if (c.num !== 'shared') body += sysMsg('phone', open ? 'Phone numbers are shared when a visit is confirmed, or earlier if you both agree.' : 'You can agree a visit and share numbers once this chat opens.');
   var lastDay = 0;
   c.msgs.forEach(function (m) {
     if (!sameDay(m.at, lastDay)) { lastDay = m.at; if (talked) body += '<div class="cap center" style="margin: 4px 0">' + (sameDay(m.at, now()) ? 'Today' : sameDay(m.at, now() - DAY) ? 'Yesterday' : dLong(m.at)) + '</div>'; }
     if (m.k === 'visitreq') body += '<div class="visitcard" style="align-self: flex-end; width: 82%"><span class="rowx gap6 b8 acc">' + ic('cal', 16) + 'Visit request</span><span class="b7">' + dDay(m.opts[0]) + '</span><span class="s14 mut">' + m.opts.map(function (t) { return tClock(t); }).join(' or ') + '</span></div>';
     else if (m.k === 'visitask') { var pending = v && v.state === 'asked';
-      body += '<div class="visitcard"><span class="rowx gap6 b8 acc">' + ic('cal', 16) + o.name + ' asked to visit</span>' + (v ? '<span class="s14 mut">' + visitText(v) + '</span>' : '') + (pending ? btn('Reply to the request', 'open', { to: 'PopVisitRequest', cid: c.id }, 'sm full') : '') + '</div>'; }
+      body += '<div class="visitcard"><span class="rowx gap6 b8 acc">' + ic('cal', 16) + o.name + ' asked to visit</span>' + (v ? '<span class="s14 mut">' + visitText(v) + '</span>' : '') + (pending ? (open ? btn('Reply to the request', 'open', { to: 'PopVisitRequest', cid: c.id }, 'sm full') : '<span class="s13 mut">You can reply when the chat opens.</span>') : '') + '</div>'; }
     else if (m.k === 'visitok') body += v && v.state === 'confirmed' && v.at === m.vat ? '<button class="sys" style="align-self: center; border: none"' + at('go', { to: 'Visit', cid: c.id }) + '><span style="display: flex">' + ic('check', 16) + '</span><span>' + m.t + ' <u>View details</u></span></button>' : sysMsg('cal', m.t.replace('Visit confirmed for', 'A visit was agreed for'));
-    else if (m.k === 'numreq') body += c.num === 'them' ? '<div class="visitcard"><span class="rowx gap6 b8 acc">' + ic('phone', 16) + o.name + ' would like to share phone numbers</span><span class="s14 mut">If you agree, you each see the other&#39;s number.</span><div class="two" style="gap: 8px">' + btn('Not now', 'numNo', { cid: c.id }, 'sm sec full') + btn('Share numbers', 'numYes', { cid: c.id }, 'sm full') + '</div></div>' : sysMsg('phone', m.t);
+    else if (m.k === 'numreq') body += c.num === 'them' ? '<div class="visitcard"><span class="rowx gap6 b8 acc">' + ic('phone', 16) + o.name + ' would like to share phone numbers</span><span class="s14 mut">If you agree, you each see the other&#39;s number.</span>' + (open ? '<div class="two" style="gap: 8px">' + btn('Not now', 'numNo', { cid: c.id }, 'sm sec full') + btn('Share numbers', 'numYes', { cid: c.id }, 'sm full') + '</div>' : '<span class="s13 mut">You can reply when the chat opens.</span>') + '</div>' : sysMsg('phone', m.t);
     else if (m.f === 'sys') body += sysMsg(m.icon, m.t);
     else body += '<div class="bubble' + (m.f === 'me' ? ' me' : '') + '">' + m.t + '</div>';
   });
@@ -2130,7 +2169,9 @@ SCREENS.Chat = function (pr) {
     var qs = c.side === 'seeker' ? [avail > now() ? 'Is the room still free from ' + dLong(avail) + '?' : 'Is the room still free?', 'How do you split the bills?', 'What are the house rules on guests?', 'When would be a good time to visit?'] : (talked ? ['Yes, it is still free.', 'When would you like to move in?', 'Would you like to come and see the room?'] : ['Hi ' + o.name + ', thanks for your interest.', 'When would you like to move in?', 'Would you like to come and see the room?']);
     body += '<div class="col gap8 mt-auto"><h2 class="sub">' + (talked ? 'Tap to reply' : 'Not sure how to start? Tap to send') + '</h2>' + qs.map(function (q) { return '<button class="qchip"' + at('quick', { cid: c.id, text: q }) + '>' + q + '</button>'; }).join('') + '</div>';
   }
-  var footer;
+  var footer, vok = v && v.state === 'confirmed';
+  var kept = (vok ? '<button class="actchip"' + at('go', { to: 'Visit', cid: c.id }) + '>' + ic('cal', 16) + 'Visit details</button>' : '') + (c.num === 'shared' ? '<button class="actchip"' + at('go', { to: 'Visit', cid: c.id, num: 1 }) + '>' + ic('phone', 16) + phoneOf(o.id) + '</button>' : '');
+  var keptRow = kept ? '<div class="hchips" style="margin-bottom: 4px">' + kept + '</div>' : '', stands = vok ? 'Your visit on ' + dDay(v.at) + ' at ' + tClock(v.at) + ' still stands. ' : '';
   if (open) {
     var acts = (v && v.state === 'confirmed' ? '<button class="actchip"' + at('go', { to: 'Visit', cid: c.id }) + '>' + ic('cal', 16) + 'Visit details</button>' : '<button class="actchip"' + at('go', { to: 'VisitPick', cid: c.id }) + '>' + ic('cal', 16) + 'Suggest a visit</button>')
       + (c.num === 'shared' ? '<button class="actchip"' + at('go', { to: 'Visit', cid: c.id, num: 1 }) + '>' + ic('phone', 16) + phoneOf(o.id) + '</button>' : c.num === 'me' ? '<span class="actchip" style="opacity: 0.6">' + ic('phone', 16) + 'Number request sent</span>' : '<button class="actchip"' + at('go', { to: 'ShareNumber', cid: c.id }) + '>' + ic('phone', 16) + 'Share my number</button>');
@@ -2139,10 +2180,10 @@ SCREENS.Chat = function (pr) {
     var d = dLong(st.until), title = talked ? 'Chat paused until ' + d : 'Chat opens on ' + d, text;
     if (c.side === 'seeker') { var r = ROOMS[c.rid];
       text = st.why === 'profile' ? 'Your profile is Early Bird until then. A pass opens the chat now. ' : (talked && c.pauseWhy === 'pass' ? 'Your pass has ended and ' + o.name + '&#39;s room is still Early Bird. ' : talked && (c.pauseWhy === 'feat' || roomFeatEnded(r)) ? o.name + '&#39;s Featured has ended and ' + her(o) + ' room is still Early Bird. ' : o.name + '&#39;s room is Early Bird until then. ') + 'A pass opens the chat now. ';
-      footer = '<div class="lockbar"><div class="hint" style="color: var(--fg)"><span class="amb">' + ic('clock', 20) + '</span><span class="col"><span class="b8">' + title + '</span><span class="s14 mut">' + text + (talked ? 'No messages are lost.' : '') + '</span></span></div>' + btn('Get a pass', 'open', { to: 'PopQuickPass', cid: c.id }) + btn('Wait until ' + d, 'back', null, 'sec') + '</div>';
+      footer = '<div class="lockbar">' + keptRow + '<div class="hint" style="color: var(--fg)"><span class="amb">' + ic('clock', 20) + '</span><span class="col"><span class="b8">' + title + '</span><span class="s14 mut">' + text + stands + (talked ? 'No messages are lost.' : '') + '</span></span></div>' + btn('Get a pass', 'open', { to: 'PopQuickPass', cid: c.id }) + btn('Wait until ' + d, 'back', null, 'sec') + '</div>';
     } else {
       text = st.why === 'profile' ? o.name + '&#39;s profile is Early Bird until then. ' : (S.listing.live && S.listing.live.feats && S.listing.live.feats.length && talked ? 'Your Featured has ended and your listing is still Early Bird. ' : 'Your listing is Early Bird until then. ');
-      footer = '<div class="lockbar"><div class="hint" style="color: var(--fg)"><span class="amb">' + ic('clock', 20) + '</span><span class="col"><span class="b8">' + title + '</span><span class="s14 mut">' + text + 'It opens sooner if you go Featured or ' + o.name + ' gets a pass. ' + (talked ? 'No messages are lost.' : '') + '</span></span></div>' + btn('See Featured', 'go', { to: 'Promote' }) + btn('Wait until ' + d, 'back', null, 'sec') + '</div>';
+      footer = '<div class="lockbar">' + keptRow + '<div class="hint" style="color: var(--fg)"><span class="amb">' + ic('clock', 20) + '</span><span class="col"><span class="b8">' + title + '</span><span class="s14 mut">' + text + 'It opens sooner if you go Featured or ' + o.name + ' gets a pass. ' + stands + (talked ? 'No messages are lost.' : '') + '</span></span></div>' + btn('See Featured', 'go', { to: 'Promote' }) + btn('Wait until ' + d, 'back', null, 'sec') + '</div>';
     }
   }
   var out = page('day', bar, '<div class="scroll" data-scroll style="gap: 10px; padding: 14px 16px' + (open ? '' : '; opacity: ' + (talked ? '0.6' : '1')) + '">' + body + '</div>', footer);
@@ -2150,6 +2191,8 @@ SCREENS.Chat = function (pr) {
 };
 A.send = function (d) {
   var t = (S.tmp.msg || '').trim(), c = S.chats[d.cid]; if (!t || !c || chatState(c).state !== 'open') return;
+  var vk = visitOf(c) && visitOf(c).state === 'confirmed', lk = leakKinds(t).filter(function (k) { return k === 'address' ? !vk : c.num !== 'shared'; })[0];
+  if (lk) { toast(lk === 'address' ? 'The exact address is shared when a visit is confirmed. It cannot be sent as a message.' : lk === 'phone' ? 'Phone numbers cannot be sent as a message. Use Share my number, or confirm a visit.' : 'Links and handles cannot be sent here.'); logEvent('m', 'blocked_' + lk); return; }
   S.tmp.msg = ''; iSaid(c, t); render();
   var f = document.getElementById('msg'); if (f) f.focus();
   if (c.side === 'seeker' && /\b(pay|paid|payment|advance|token|transfer|upi|gpay|deposit now)\b/i.test(t) && !S.flags.safety) { S.flags.safety = 1; openOv('PopSafety', { auto: 1, cid: c.id }); }
@@ -2158,7 +2201,7 @@ A.quick = function (d) { var c = S.chats[d.cid]; if (!c) return; iSaid(c, d.text
 OVERLAYS.PopChatMenu = function (pr) {
   var c = S.chats[pr.cid], o = chatOther(c), open = chatState(c).state === 'open', sub = c.side === 'seeker' ? { rid: c.rid } : { pid: c.pid };
   return sheet(o.name + (c.side === 'lister' ? ' ' + o.last : ''), '', '<div class="col">' + srow('user', 'View profile', 'go', c.side === 'seeker' ? { to: 'ListerPublic', rid: c.rid } : { to: 'Person', pid: c.pid })
-    + (open && c.num === 'none' ? srow('phone', 'Share my number', 'go', { to: 'ShareNumber', cid: c.id }) : '') + (open ? srow('cal', visitOf(c) && visitOf(c).state === 'confirmed' ? 'Visit details' : 'Suggest a visit', 'go', { to: visitOf(c) && visitOf(c).state === 'confirmed' ? 'Visit' : 'VisitPick', cid: c.id }) : '')
+    + (open && c.num === 'none' ? srow('phone', 'Share my number', 'go', { to: 'ShareNumber', cid: c.id }) : '') + (visitOf(c) && visitOf(c).state === 'confirmed' ? srow('cal', 'Visit details', 'go', { to: 'Visit', cid: c.id }) : open ? srow('cal', 'Suggest a visit', 'go', { to: 'VisitPick', cid: c.id }) : '')
     + srow('shield', 'Safety tips', 'open', { to: 'PopSafety', cid: c.id }) + srow('flag', 'Report', 'go', Object.assign({ to: 'ReportBlock' }, sub)) + srow('x', 'Block ' + o.name, 'open', Object.assign({ to: 'PopBlock' }, sub), 'red') + '</div>' + btn('Close', 'close', null, 'sec'));
 };
 OVERLAYS.PopSafety = function (pr) {
@@ -2169,23 +2212,25 @@ OVERLAYS.PopSafety = function (pr) {
 };
 
 // ---------- phone numbers ----------
+function chatOpen(c) { return !!c && chatState(c).state === 'open'; }
+function notOpen() { toast('This works once the chat is open'); }
 SCREENS.ShareNumber = function (pr) {
-  var c = S.chats[pr.cid], o = chatOther(c);
+  var c = S.chats[pr.cid], o = chatOther(c); if (!chatOpen(c)) { back(); return null; }
   return confirmPage('day', 'phone', 'Share your number with ' + o.name + '?', 'We ask ' + o.name + ' to share ' + hers(o) + ' too. You each see the other&#39;s number only when you both agree. Numbers are also shared when a visit is confirmed.',
     btn('Share my number', 'askNumber', { cid: c.id }) + btn('Not now', 'back', null, 'sec'), '', ['back']);
 };
-A.askNumber = function (d) { var c = S.chats[d.cid]; c.num = 'me'; addMsg(c, 'sys', 'You asked to share phone numbers.', 'num', { icon: 'phone' }); later(rnd(5, 9), 'numOk', { cid: c.id }); back(); toast('Request sent'); };
+A.askNumber = function (d) { var c = S.chats[d.cid]; if (!chatOpen(c)) { notOpen(); return; } c.num = 'me'; addMsg(c, 'sys', 'You asked to share phone numbers.', 'num', { icon: 'phone' }); later(rnd(5, 9), 'numOk', { cid: c.id }); back(); toast('Request sent'); };
 OVERLAYS.PopNumberRequest = function (pr) {
-  var c = S.chats[pr.cid]; if (!c || c.num !== 'them') return null; var o = chatOther(c);
+  var c = S.chats[pr.cid]; if (!c || c.num !== 'them' || !chatOpen(c)) return null; var o = chatOther(c);
   return sheet(o.name + ' wants to share numbers', 'If you agree, you each see the other&#39;s number. Until then both stay hidden.', '<div class="col gap10">' + btn('Share numbers', 'numYes', { cid: c.id }) + btn('Not now', 'numNo', { cid: c.id }, 'sec') + '</div>');
 };
-A.numYes = function (d) { var c = S.chats[d.cid]; shareNumbers(c, 'You both agreed. You can now see each other&#39;s phone numbers.'); OV = null; toast('Number shared with ' + chatOther(c).name); if (cur().n === 'Chat' && cur().p.cid === c.id) render(); else go('Chat', { cid: c.id }); };
+A.numYes = function (d) { var c = S.chats[d.cid]; if (!chatOpen(c)) { OV = null; notOpen(); render(); return; } shareNumbers(c, 'You both agreed. You can now see each other&#39;s phone numbers.'); OV = null; toast('Number shared with ' + chatOther(c).name); if (cur().n === 'Chat' && cur().p.cid === c.id) render(); else go('Chat', { cid: c.id }); };
 A.numNo = function (d) { var c = S.chats[d.cid]; c.num = 'none'; closeOv(); render(); };
 
 // ---------- visits ----------
 function visitDays() { var out = [], d = startOfDay(now()); for (var i = 1; i <= 5; i++) out.push(d + i * DAY); return out; }
 SCREENS.VisitPick = function (pr) {
-  var c = S.chats[pr.cid], o = chatOther(c), days = visitDays();
+  var c = S.chats[pr.cid], o = chatOther(c), days = visitDays(); if (!chatOpen(c)) { back(); return null; }
   if (!S.tmp.vp || S.tmp.vp.cid !== c.id) S.tmp.vp = { cid: c.id, day: days[0], times: [11] };
   var vp = S.tmp.vp, hours = [10, 11, 12, 16, 17, 18, 19];
   var dchips = days.map(function (d) { var on = vp.day === d, x = new Date(d); return '<button class="chip' + (on ? ' on' : '') + '" aria-pressed="' + on + '"' + at('vpDay', { val: d }) + '>' + DAYS[x.getDay()].slice(0, 3) + ' ' + x.getDate() + ' ' + MONTHS[x.getMonth()].slice(0, 3) + '</button>'; }).join('');
@@ -2197,7 +2242,8 @@ SCREENS.VisitPick = function (pr) {
 A.vpDay = function (d) { S.tmp.vp.day = Number(d.val); render(); };
 A.vpTime = function (d) { var t = S.tmp.vp.times, h = Number(d.val), i = t.indexOf(h); if (i >= 0) t.splice(i, 1); else if (t.length < 3) t.push(h); else { toast('Pick up to three times'); return; } t.sort(function (a2, b) { return a2 - b; }); render(); };
 A.vpSend = function (d) {
-  var c = S.chats[d.cid], vp = S.tmp.vp, opts = vp.times.map(function (h) { return vp.day + h * HOUR; });
+  var c = S.chats[d.cid]; if (!chatOpen(c)) { notOpen(); return; }
+  var vp = S.tmp.vp, opts = vp.times.map(function (h) { return vp.day + h * HOUR; });
   S.visits[c.id] = { cid: c.id, state: 'requested', options: opts, at: null };
   addMsg(c, 'me', '', 'visitreq', { opts: opts }); TYPING[c.id] = true; later(rnd(5, 8), 'visitConfirm', { cid: c.id });
   S.tmp.vp = null; mile(c.side === 'seeker' ? 'visit_requested' : 'visit_suggested'); backTo('Chat');
@@ -2212,8 +2258,8 @@ SCREENS.Visit = function (pr) {
   return page('day', topbar(seeker ? 'Your visit' : 'Visit with ' + o.name), scroll((seeker ? '<div class="mapbox">' + ic('pin', 36, 2.2) + '<span class="cap b" style="position: absolute; bottom: 12px">Map of the area</span></div>' : '') + card
     + hint('lock', seeker ? 'The address and number are private. Please do not pass them on.' : 'Only ' + o.name + ' can see the address. It is hidden again if the visit is cancelled.')
     + sec(seeker ? 'Before you go' : 'Before ' + pron(o).toLowerCase() + ' arrives', ul(seeker ? [li('Tell a friend where you are going.'), li('Do not pay anything before you have seen the room.'), li('Afterwards ' + lnk('we ask you both how it went', 'open', { to: 'PopAfterVisit', cid: c.id }, 'inl') + '.')] : [li('Let your flatmates know someone is visiting.'), li('Do not take any money until you have both agreed on the move.'), li('Afterwards ' + lnk('we ask you both how it went', 'open', { to: 'PopAfterVisit', cid: c.id }, 'inl') + '.')]))
-    + '<div class="two" style="gap: 10px">' + btn('Change the time', 'go', { to: 'VisitPick', cid: c.id }, 'sm sec full') + btn('Cancel visit', 'open', { to: 'PopCancelVisit', cid: c.id }, 'sm sec full red') + '</div>', 'wide'),
-    foot((seeker ? btn('Get directions', 'toast', { text: 'In the app, this opens your maps' }) : btn('Message ' + o.name, 'back')) + btn('Add to calendar', 'toast', { text: 'In the app, this opens your calendar' }, 'sec') + cap('These open your maps and calendar apps.', 'center'), 'wide'));
+    + (chatOpen(c) ? '<div class="two" style="gap: 10px">' + btn('Change the time', 'go', { to: 'VisitPick', cid: c.id }, 'sm sec full') + btn('Cancel visit', 'open', { to: 'PopCancelVisit', cid: c.id }, 'sm sec full red') + '</div>' : hint('clock', 'The chat is paused, but this visit stands. The time can be changed once the chat is open again.') + btn('Cancel visit', 'open', { to: 'PopCancelVisit', cid: c.id }, 'sm sec full red')), 'wide'),
+    foot((seeker ? btn('Get directions', 'toast', { text: 'In the app, this opens your maps' }) : btn(chatOpen(c) ? 'Message ' + o.name : 'Back to the chat', 'back')) + btn('Add to calendar', 'toast', { text: 'In the app, this opens your calendar' }, 'sec') + cap('These open your maps and calendar apps.', 'center'), 'wide'));
 };
 OVERLAYS.PopCancelVisit = function (pr) {
   var c = S.chats[pr.cid], o = chatOther(c), v = visitOf(c);
@@ -2221,14 +2267,14 @@ OVERLAYS.PopCancelVisit = function (pr) {
 };
 A.cancelVisit = function (d) { mile('visit_cancelled'); var c = S.chats[d.cid]; delete S.visits[c.id]; cancelEv('afterVisit', function (p) { return p.cid === c.id; }); addMsg(c, 'sys', 'You cancelled the visit.', 'state', { icon: 'x' }); OV = null; toast('Visit cancelled'); backTo('Chat'); };
 OVERLAYS.PopVisitRequest = function (pr) {
-  var c = S.chats[pr.cid], v = c && visitOf(c); if (!v || v.state !== 'asked') return null;
+  var c = S.chats[pr.cid], v = c && visitOf(c); if (!v || v.state !== 'asked' || !chatOpen(c)) return null;
   var o = chatOther(c); if (S.tmp.vr == null || v.options.indexOf(S.tmp.vr) < 0) S.tmp.vr = v.options[0];
   return sheet(o.name + ' would like to visit', 'Pick the time that suits you.', '<div class="col gap8"><span class="label">' + dDay(v.options[0]) + '</span><div class="wrap">' + v.options.map(function (t) { var on = S.tmp.vr === t; return '<button class="chip' + (on ? ' on' : '') + '"' + at('vrPick', { val: t }) + '>' + tClock(t) + '</button>'; }).join('') + '</div></div>'
     + hint('lock', 'When you accept, ' + o.name + ' gets your address and you both get each other&#39;s phone number.')
     + '<div class="col gap10">' + btn('Accept ' + tClock(S.tmp.vr), 'vrAccept', { cid: c.id }) + btn('Suggest another time in chat', 'vrLater', { cid: c.id }, 'sec') + lnk('Decline', 'vrDecline', { cid: c.id }) + '</div>');
 };
 A.vrPick = function (d) { S.tmp.vr = Number(d.val); renderOv(); };
-A.vrAccept = function (d) { var c = S.chats[d.cid], at2 = S.tmp.vr; addMsg(c, 'me', DAYS[new Date(at2).getDay()] + ' at ' + tClock(at2) + ' works. See you then.'); confirmVisit(c, at2, false); OV = null; sayAfter(c, 4, 'Great, see you then.'); if (cur().n === 'Chat' && cur().p.cid === c.id) { render(); go('Visit', { cid: c.id }); } else { go('Chat', { cid: c.id }); go('Visit', { cid: c.id }); } };
+A.vrAccept = function (d) { var c = S.chats[d.cid], at2 = S.tmp.vr; if (!chatOpen(c)) { OV = null; notOpen(); render(); return; } addMsg(c, 'me', DAYS[new Date(at2).getDay()] + ' at ' + tClock(at2) + ' works. See you then.'); confirmVisit(c, at2, false); OV = null; sayAfter(c, 4, 'Great, see you then.'); if (cur().n === 'Chat' && cur().p.cid === c.id) { render(); go('Visit', { cid: c.id }); } else { go('Chat', { cid: c.id }); go('Visit', { cid: c.id }); } };
 A.vrLater = function (d) { OV = null; if (!(cur().n === 'Chat' && cur().p.cid === d.cid)) go('Chat', { cid: d.cid }); else render(); };
 A.vrDecline = function (d) { var c = S.chats[d.cid]; delete S.visits[c.id]; addMsg(c, 'sys', 'You declined the visit request.', 'state', { icon: 'x' }); closeOv(); render(); };
 OVERLAYS.PopAfterVisit = function (pr) {
@@ -2261,7 +2307,7 @@ SCREENS.SeekerPaywall = function (pr) {
 };
 SCREENS.Passes = function () {
   var plan = planBy(S.tmp.plan);
-  return page('night', closebar('back'), scroll('<span class="bigicon" style="width: 56px; height: 56px">' + ic('chat', 28) + '</span>' + head(passOn() ? 'Extend your pass' : 'Chat without the wait', passOn() ? 'Your pass runs until ' + dLong(S.me.pass.until) + ' at ' + tClock(S.me.pass.until) + '. More days are added to the end of it.' : 'New rooms and new profiles are Early Bird for 12 days. A pass opens chat straight away, every time you and a lister have both said yes. Everything else on Homingle is free.')
+  return page('night', closebar('back'), scroll('<span class="bigicon" style="width: 56px; height: 56px">' + ic('chat', 28) + '</span>' + head(passOn() ? 'Extend your pass' : 'Chat without the wait', passOn() ? 'Your pass runs until ' + dLong(S.me.pass.until) + ' at ' + tClock(S.me.pass.until) + '. More days are added to the end of it.' : 'New rooms and new profiles are Early Bird for ' + EB_DAYS + ' days. A pass opens chat straight away, every time you and a lister have both said yes. Everything else on Homingle is free.')
     + planList() + '<div class="s14">' + PASS_POINTS() + '</div>', '', 'padding-top: 0'),
     foot(btn('Pay ' + inr(plan.price), 'go', { to: 'Checkout', kind: 'pass' }) + cap('One-time payment. It does not renew on its own.', 'center')));
 };
@@ -2328,7 +2374,7 @@ function wouldPause() {
 }
 function pauseText(list, future) {
   if (!list.length) return 'All your chats stay open.';
-  if (list.length === 1) return 'Your chat with ' + list[0][0] + (future ? ' pauses' : ' is paused') + ' until ' + dLong(list[0][1]) + ', when the 12 days are up. Your other chats stay open.';
+  if (list.length === 1) return 'Your chat with ' + list[0][0] + (future ? ' pauses' : ' is paused') + ' until ' + dLong(list[0][1]) + ', when the ' + EB_DAYS + ' days are up. Your other chats stay open.';
   return 'Your chats with ' + joinNames(list.map(function (x) { return x[0]; })) + (future ? ' pause' : ' are paused') + ' until their Early Bird dates. Your other chats stay open.';
 }
 OVERLAYS.PopPassEnding = function () {
@@ -2357,7 +2403,7 @@ SCREENS.Promote = function () {
 };
 SCREENS.PromoteDone = function () {
   var early = now() < myEb();
-  return confirmPage('night', 'star', 'Your listing is Featured', 'For the next 5 days it sits at the top of the feed and is tagged Free to chat. Chat opens as soon as you accept someone, pass or not.' + (early ? ' If Featured ends before your listing is 12 days old, chats with people without a pass pause until ' + dLong(myEb()) + '.' : ''),
+  return confirmPage('night', 'star', 'Your listing is Featured', 'For the next 5 days it sits at the top of the feed and is tagged Free to chat. Chat opens as soon as you accept someone, pass or not.' + (early ? ' If Featured ends before your listing is ' + EB_DAYS + ' days old, chats with people without a pass pause until ' + dLong(myEb()) + '.' : ''),
     btn('See who is interested', 'home', { to: 'Applicants' }) + btn('Back to my listing', 'go', { to: 'ListerHome' }, 'sec'));
 };
 SCREENS.BoostDone = function () {
@@ -2366,7 +2412,7 @@ SCREENS.BoostDone = function () {
 OVERLAYS.PopFeaturedEnding = function () {
   var early = now() < myEb();
   var l = myListing(), fu = l && l.feat ? l.feat.until : now();
-  return sheet('Featured ends ' + (sameDay(fu, now()) ? 'today' : sameDay(fu, now() + DAY) ? 'tomorrow' : 'on ' + dLong(fu)), 'Your listing goes back to its normal place in the feed.' + (early ? ' Until ' + dLong(myEb()) + ', when it is 12 days old, chats with people without a pass are paused.' : ' Your chats stay open, because your listing is more than 12 days old.'), '<div class="col gap10">' + btn('Renew Featured · ' + inr(FEATURED.price), 'promoGo', { kind: 'featured' }) + btn('Later', 'close', null, 'sec') + '</div>');
+  return sheet('Featured ends ' + (sameDay(fu, now()) ? 'today' : sameDay(fu, now() + DAY) ? 'tomorrow' : 'on ' + dLong(fu)), 'Your listing goes back to its normal place in the feed.' + (early ? ' Until ' + dLong(myEb()) + ', when it is ' + EB_DAYS + ' days old, chats with people without a pass are paused.' : ' Your chats stay open, because your listing is more than ' + EB_DAYS + ' days old.'), '<div class="col gap10">' + btn('Renew Featured · ' + inr(FEATURED.price), 'promoGo', { kind: 'featured' }) + btn('Later', 'close', null, 'sec') + '</div>');
 };
 A.promoGo = function (d) { OV = null; S.tmp.promo = d.kind; go('Checkout', { kind: d.kind }); };
 OVERLAYS.PopBoostEnded = function () {
@@ -2400,10 +2446,10 @@ SCREENS.ListingOptions = function () {
   return page('night', topbar('List your room'), scroll(head('Listing your room is free', 'Here is how people reach you, so there are no surprises later.')
     + '<div class="card pad col gap14">' + detail('heart', 'Anyone can send you interest', 'Free for them, from the first day. You choose who to accept.')
     + detail('chat', 'People with a pass can chat straight away', 'A pass is something people looking for a room can buy. Those who have one are tagged Free to chat.')
-    + detail('clock', 'Everyone else can chat after 12 days', 'For its first 12 days a free listing is Early Bird. After that, chat is free with everyone who applied and you accept.') + '</div>'
+    + detail('clock', 'Everyone else can chat after ' + EB_DAYS + ' days', 'For its first ' + EB_DAYS + ' days a free listing is Early Bird. After that, chat is free with everyone who applied and you accept.') + '</div>'
     + '<div class="card" style="overflow: hidden"><div class="tbl" style="min-height: 52px"><span></span><span class="b8 s14">Free</span><span class="col" style="line-height: 1.2"><span class="b8 s14">Featured</span><span class="mut" style="font-size: 11px">₹500 · 5 days</span></span></div>'
-    + row('Your room is listed and shown in search', true, true) + row('Receive interest from everyone', true, true) + row('Invite people who match', true, true) + row('Chat with pass holders', 'Day 1', 'Day 1') + row('Chat with everyone else', 'Day 12', 'Day 1') + row('Place in the feed', 'Normal', 'Top') + '</div>'
-    + hint('clock', 'Featured opens chat for the 5 days it runs. If it ends before your listing is 12 days old, chats with people without a pass pause until day 12.')
+    + row('Your room is listed and shown in search', true, true) + row('Receive interest from everyone', true, true) + row('Invite people who match', true, true) + row('Chat with pass holders', 'Day 1', 'Day 1') + row('Chat with everyone else', 'Day ' + EB_DAYS, 'Day 1') + row('Place in the feed', 'Normal', 'Top') + '</div>'
+    + hint('clock', 'Featured opens chat for the 5 days it runs. If it ends before your listing is ' + EB_DAYS + ' days old, chats with people without a pass pause until day ' + EB_DAYS + '.')
     + hint('shield', 'You verify once with DigiLocker before the listing goes live. Your name comes from there, so you never type it.'), 'wide'),
     foot(btn(resume ? 'Carry on with my listing' : 'List my room for free', 'startListing') + cap('You can go Featured later, from My listing.', 'center'), 'wide'));
 };
@@ -2461,7 +2507,7 @@ SCREENS.AddRoom = function () {
     + group('Bills', chips('listing.draft.bills', ['Included in the rent', 'Split between flatmates', 'Paid separately']), 'Electricity, water, Wi-Fi and the cook or cleaner.')
     + group('Available from', chips('listing.draft.from', ['Right away', 'In two weeks', 'The 1st of next month']))
     + group('Minimum stay', chips('listing.draft.minStay', ['No minimum', '3 months', '6 months', '11 months'])) + group('Notice period', chips('listing.draft.notice', ['15 days', '1 month', '2 months']))
-    + area('ldesc', 'Describe the room and the flat', 'listing.draft.desc', 'For example: bright corner room with a balcony, ten minutes from the metro. The flat is quiet on weekdays.', 'Please do not add phone numbers or links here.'), '', 'padding-top: 12px'), formFoot(2));
+    + area('ldesc', 'Describe the room and the flat', 'listing.draft.desc', 'For example: bright corner room with a balcony, ten minutes from the metro. The flat is quiet on weekdays.', 'Phone numbers, links and exact addresses cannot be written here.'), '', 'padding-top: 12px'), formFoot(2));
 };
 function mateRow(m, i) {
   return '<div class="card rowx gap12" style="padding: 14px">' + av({ name: m.name }, 44) + '<div class="col grow gap4"><span class="b8">' + esc(m.name) + (m.age ? ', ' + esc(m.age) : '') + '</span><span class="s13 mut">' + esc(m.job || '') + '</span><div class="wrap" style="gap: 6px">' + (m.tags || []).map(function (t) { return ichip(t); }).join('') + '</div></div>' + btn('Edit', 'mateEdit', { i: i }, 'sm sec') + '</div>';
@@ -2587,7 +2633,7 @@ SCREENS.PeopleFilters = function () {
 };
 OVERLAYS.PopEarlyBirdLister = function () {
   return sheet('When can you chat?', 'Inviting and accepting are always free. Only chat can have a wait.', ul([li('<strong>Free to chat.</strong> Chat opens as soon as you have both said yes: this person has a pass, or your listing is Featured.', 'chat'),
-    li('<strong>Early Bird.</strong> Chat opens on the date shown. For people who applied to your room, that is when your listing is 12 days old. For people you invite, it is when their profile is 12 days old.', 'clock'),
+    li('<strong>Early Bird.</strong> Chat opens on the date shown. For people who applied to your room, that is when your listing is ' + EB_DAYS + ' days old. For people you invite, it is when their profile is ' + EB_DAYS + ' days old.', 'clock'),
     li('<strong>No tag.</strong> Chat is already free.'), li('Going Featured opens chat with everyone you accept, for as long as it runs.', 'star')]) + btn('Got it', 'close'));
 };
 A.invite = function (d) {
@@ -2656,7 +2702,7 @@ SCREENS.Applicants = function () {
   pend.sort(function (a2, b) { return sc(b) - sc(a2); });
   var free = pend.filter(function (p) { return personTag(p, 'applicant') === 'free'; }), early = now() < myEb() && !myFeatured(), rest = pend.length - free.length;
   var bn = pend.length ? '<div class="tintbox col gap6"><span class="b8" style="font-size: 17px">' + pend.length + (pend.length === 1 ? ' person is' : ' people are') + ' interested</span><span class="s14">Accepting is free. '
-    + (myFeatured() ? 'Your listing is Featured, so chat opens with everyone you accept.' : !early ? 'Your listing is more than 12 days old, so chat opens with everyone you accept.' : (free.length ? joinNames(free.map(function (p) { return p.name; })) + (free.length === 1 ? ' is' : ' are') + ' Free to chat. ' : '') + (rest ? (free.length ? 'With the other ' + (rest === 1 ? 'one' : rest) + ', chat' : 'Chat') + ' opens on ' + dLong(myEb()) + ', when your listing is 12 days old.' : '')) + '</span>' + lnk('How this works', 'open', { to: 'PopEarlyBirdLister' }, 'left s') + '</div>' : '';
+    + (myFeatured() ? 'Your listing is Featured, so chat opens with everyone you accept.' : !early ? 'Your listing is more than ' + EB_DAYS + ' days old, so chat opens with everyone you accept.' : (free.length ? joinNames(free.map(function (p) { return p.name; })) + (free.length === 1 ? ' is' : ' are') + ' Free to chat. ' : '') + (rest ? (free.length ? 'With the other ' + (rest === 1 ? 'one' : rest) + ', chat' : 'Chat') + ' opens on ' + dLong(myEb()) + ', when your listing is ' + EB_DAYS + ' days old.' : '')) + '</span>' + lnk('How this works', 'open', { to: 'PopEarlyBirdLister' }, 'left s') + '</div>' : '';
   var body = !all.length ? '<div class="col center gap16" style="align-items: center; padding: 56px 12px 0">' + bigicon('users') + head('No applicants yet', 'People who send interest in your room show up here. You can also invite people yourself.') + btn('Find people to invite', 'home', { to: 'BrowseSeekers' }) + '</div>'
     : bn + pend.map(aRow).join('') + (acc.length ? '<h2 class="sub" style="margin-top: 10px">Accepted</h2>' + acc.map(aRow).join('') : '') + (!pend.length && acc.length ? '<p class="cap center s13">No one is waiting for an answer.</p>' : '');
   var short = all.filter(function (p) { return S.listing.applicants[p.id].state === 'shortlisted'; }).length;
@@ -2684,7 +2730,7 @@ function infoCard(icon, title, text, extra) { return '<div class="card pad col g
 SCREENS.ListerHome = function () {
   var l = myListing(); if (!l) { home('ListingOptions'); return null; }
   var n = now(), body = listingCard(l);
-  if (l.filled) body += infoCard('check', 'This room is marked as filled', 'It is no longer shown, and everyone who sent interest has been told.') + btn('List another room', 'open', { to: 'PopOneListing' }, 'sec');
+  if (l.filled) body += infoCard('check', 'This room is marked as filled', 'It is no longer shown, and everyone who sent interest has been told. If it falls through, you can re-open it.') + btn('Re-open this room', 'open', { to: 'PopReopen' }) + btn('List a different room', 'open', { to: 'PopOneListing' }, 'sec');
   else if (l.expired) body += '<p class="p">This listing ran for ' + LISTING_DAYS + ' days and is now hidden. Your applicants and chats are kept.</p>' + btn('Renew listing', 'go', { to: 'RenewListing' }) + btn('Mark as filled', 'go', { to: 'MarkFilled' }, 'sec');
   else {
     var b = myBoosted() ? l.boost : null, s = b ? listingStats(b.at, n) : listingStats(n - 7 * DAY, n), before = b ? listingStats(b.at - 7 * DAY, b.at) : null;
@@ -2693,7 +2739,7 @@ SCREENS.ListerHome = function () {
     if (myFeatured()) body += infoCard('star', 'Featured until ' + dLong(l.feat.until) + ', ' + tClock(l.feat.until), 'Your room is at the top of the feed and tagged Free to chat. Chat opens with everyone you accept.' + (l.feat.until < myEb() ? ' After it ends, chats with people without a pass pause until ' + dLong(myEb()) + '.' : ''), lnk('What happens when it ends', 'open', { to: 'PopFeaturedEnding' }, 'left s'));
     else if (n < myEb()) body += infoCard('clock', 'Early Bird until ' + dLong(myEb()), 'Your listing is ' + Math.max(0, daysBetween(l.at, n)) + (daysBetween(l.at, n) === 1 ? ' day' : ' days') + ' old. People with a pass can chat with you now. From ' + dLong(myEb()) + ', chat is free with everyone who applied and you accept. People you invite have their own date, shown on their card.', lnk('How this works', 'open', { to: 'PopEarlyBirdLister' }, 'left s'));
     body += infoCard('up', 'Get seen by more people', 'Boost for 3 days to take every fourth place in the feed, or go Featured for the top of the feed and chat with everyone you accept.', btn('See options', 'go', { to: 'Promote' }, 'sm sec full'));
-    body += '<div class="dash rowx gap12" style="align-items: flex-start"><span class="mut" style="display: flex; margin-top: 2px">' + ic('lock', 20) + '</span><div class="col" style="gap: 2px"><span class="b8">One listing at a time</span><span class="s14 mut">A different address can be listed 25 days after this one went live.</span>' + lnk('When can I list another?', 'open', { to: 'PopOneListing' }, 'left s') + '</div></div>';
+    body += '<div class="dash rowx gap12" style="align-items: flex-start"><span class="mut" style="display: flex; margin-top: 2px">' + ic('lock', 20) + '</span><div class="col" style="gap: 2px"><span class="b8">One room at a time</span><span class="s14 mut">A different room can be listed ' + NEXT_DAYS + ' days after this one went live. This room can be renewed or re-opened at any time.</span>' + lnk('When can I list another?', 'open', { to: 'PopOneListing' }, 'left s') + '</div></div>';
   }
   return page('day', topbar('My listing'), scroll(body, 'tight'), nav('Profile'));
 };
@@ -2701,9 +2747,24 @@ A.resumeListing = function () { myListing().paused = false; toast('Listing is li
 OVERLAYS.PopPauseListing = function () { return dialog('Pause your listing?', 'It is hidden from the feed and no new interest comes in. Your current chats stay open.', '<div class="col gap10">' + btn('Pause listing', 'pauseListing') + btn('Cancel', 'close', null, 'sec') + '</div>'); };
 A.pauseListing = function () { myListing().paused = true; closeOv(); render(); toast('Listing paused', function () { myListing().paused = false; render(); }); };
 OVERLAYS.PopOneListing = function () {
-  var l = myListing(), d = dLong(l.at + 25 * DAY);
-  return dialog('One listing at a time', (l.filled ? 'Your ' + l.area + ' room is marked as filled.' : 'You already have a listing in ' + l.area + '.') + ' A different address can be listed after ' + d + '.', btn('Go to my listing', 'close'), '<span class="bigicon" style="width: 48px; height: 48px">' + ic('lock', 24) + '</span>');
+  var l = myListing(), t = l.at + NEXT_DAYS * DAY, d = dLong(t), due = now() >= t, done = l.filled || l.expired, icon = '<span class="bigicon" style="width: 48px; height: 48px">' + ic(due && done ? 'home' : 'lock', 24) + '</span>';
+  if (due && done) return dialog('List a different room?', 'Your ' + l.area + ' listing is closed for good, and its applicants and chats go with it. You then list the new room from the start.', '<div class="col gap10">' + btn('List a different room', 'newListing') + btn('Not now', 'close', null, 'sec') + '</div>', icon);
+  if (due) return dialog('One room at a time', 'You can list a different room now. Mark your ' + l.area + ' room as filled first, or let it end.', btn('Go to my listing', 'close'), icon);
+  return dialog('One room at a time', (l.filled ? 'Your ' + l.area + ' room is marked as filled.' : 'You already have a listing in ' + l.area + '.') + ' A different room can be listed after ' + d + ', ' + NEXT_DAYS + ' days after this one went live. Until then you can ' + (l.filled ? 're-open' : 'renew or re-open') + ' this room.', btn('Go to my listing', 'close'), icon);
 };
+A.newListing = function () {
+  var l = myListing(); if (!l || now() < l.at + NEXT_DAYS * DAY || !(l.filled || l.expired)) { closeOv(); return; }
+  (S.listing.past = S.listing.past || []).push({ area: l.area, at: l.at, closed: now() });
+  for (var k in S.chats) if (S.chats[k].side === 'lister') { delete S.visits[k]; delete S.chats[k]; }
+  S.sched = S.sched.filter(function (e) { var cid = e.p && e.p.cid; return e.type !== 'applicant' && e.type !== 'inviteAccepted' && !(cid && String(cid).indexOf('lister:') === 0); });
+  S.listing.live = null; S.listing.draft = null; S.listing.step = 1; S.listing.applicants = {}; S.listing.sent = {}; S.me.done.lister = false; S.notifs.lister = [];
+  mile('new_listing_started'); OV = null; home('ListingOptions');
+};
+OVERLAYS.PopReopen = function () {
+  var l = myListing(); if (!l || !l.filled) return null;
+  return dialog('Re-open this room?', 'It goes back into the feed as the same listing, first listed on ' + dLong(l.at) + '. The people who applied before are still under Applicants.', '<div class="col gap10">' + btn('Re-open this room', 'reopenListing') + btn('Keep it as filled', 'close', null, 'sec') + '</div>');
+};
+A.reopenListing = function () { var l = myListing(); if (!l || !l.filled) { closeOv(); return; } l.filled = null; l.paused = false; if (myEnds() <= now()) l.expired = true; mile('reopened'); if (!l.expired) scheduleApplicants(); OV = null; render(); toast(l.expired ? 'Re-opened. Renew it to show it again.' : 'Your room is live again'); };
 OVERLAYS.PopListingEnding = function () {
   return sheet('Your listing ends ' + endsIn(myEnds()), 'After that it is hidden from the feed. Renewing keeps your applicants and chats.', '<div class="col gap10">' + btn('Renew listing', 'go', { to: 'RenewListing' }) + btn('Mark as filled', 'go', { to: 'MarkFilled' }, 'sec') + lnk('Later', 'close') + '</div>');
 };
@@ -2716,7 +2777,7 @@ SCREENS.EditListing = function () {
 A.editStep = function (d) { S.listing.draft = clone(myListing()); S.listing.editing = true; go(d.to); };
 SCREENS.MarkFilled = function () {
   var opts = ['I found someone on Homingle', 'I found someone elsewhere', 'I am no longer letting it out']; if (!S.tmp.fill) S.tmp.fill = opts[0];
-  return page('day', closebar('back'), scroll(bigicon('check') + head('Has the room been filled?', 'The listing comes down, and everyone who sent interest is told it is no longer available.')
+  return page('day', closebar('back'), scroll(bigicon('check') + head('Has the room been filled?', 'The listing comes down, and everyone who sent interest is told it is no longer available. If it falls through, you can re-open it.')
     + '<div class="menu">' + opts.map(function (x) { var on = S.tmp.fill === x; return '<button class="mlink"' + at('set', { path: 'tmp.fill', val: x }) + '><span class="radio' + (on ? ' on' : '') + '" style="--sheet-or-bg: var(--card)"></span><span class="grow b6">' + x + '</span></button>'; }).join('') + '</div>', '', 'padding-top: 0'),
     foot(btn('Mark as filled', 'markFilled') + btn('Keep it live', 'back', null, 'sec')));
 };
@@ -2786,7 +2847,7 @@ SCREENS.NotifPrefs = function () {
 SCREENS.Privacy = function () {
   var n = S.me.blocked.length;
   return page('night', topbar('Privacy'), scroll('<div class="menu">' + sw('me.privacy.findable', 'Let listers find and invite me', 'Verified listers whose room matches your search can see your profile.') + sw('me.privacy.showWork', 'Show where I work') + sw('me.privacy.paused', 'Pause my profile', 'Hide me from everyone until I turn this off.') + '</div>'
-    + hint('lock', 'Your phone number is shown only to someone you agree to share it with, or whose visit is confirmed.')
+    + hint('lock', 'Your phone number is shown only to someone you agree to share it with in an open chat, or whose visit is confirmed.')
     + menu([mlink('x', 'Blocked people', n + ' blocked', 'go', { to: 'Blocked' }), mlink('list', 'Download my data', '', 'open', { to: 'PopDataRequest' }), mlink('trash', 'Delete my account', '', 'go', { to: 'DeleteAccount' }, 'red')]), 'wide'));
 };
 SCREENS.Blocked = function () {
@@ -2802,10 +2863,10 @@ function qa(q, text) { return '<details class="qa"><summary>' + q + '</summary><
 SCREENS.Help = function () {
   return page('night', topbar('Help'), scroll(sec('Common questions', '<div class="menu">'
     + qa('What is free?', 'Listing a room, browsing, sending interest, inviting, accepting, and every chat once the Early Bird date has passed.')
-    + qa('When can I chat with someone?', 'Once one of you has accepted the other. A new room is Early Bird for its first 12 days. When a lister invites someone, the 12 days are counted on that person&#39;s profile instead. Until that date, chat opens only if one of you has paid, with a pass or a Featured listing. From that date it is free.')
+    + qa('When can I chat with someone?', 'Once one of you has accepted the other. A new room is Early Bird for its first ' + EB_DAYS + ' days. When a lister invites someone, the ' + EB_DAYS + ' days are counted on that person&#39;s profile instead. Until that date, chat opens only if one of you has paid, with a pass or a Featured listing. From that date it is free.')
     + qa('What do the tags mean?', 'Free to chat: one of you has paid (a pass, or a Featured listing), so chat opens as soon as you have both said yes. Early Bird: chat opens on the date shown. No tag: chat is already free.')
     + qa('Why do I need to verify?', 'Verification through DigiLocker keeps women safe and keeps brokers out. You do it once, before you first send interest or publish a listing. Your name comes from it, so you never type one.')
-    + qa('When are phone numbers shared?', 'When a visit is confirmed, or earlier if you both agree in the chat.')
+    + qa('When are phone numbers shared?', 'When a visit is confirmed, or earlier if you both agree in the chat. Both need an open chat. Phone numbers, links and exact addresses cannot be typed into a profile, a listing or a message.') + qa('What happens to a visit if my chat is paused?', 'A visit that is already confirmed stands. You keep the address and the phone number. You cannot send new messages or change the time until the chat is open again.')
     + qa('What do Boost and Featured do?', 'Boost gives a listing every fourth place in the feed for 3 days. Featured puts it at the top for 5 days and opens chat with everyone the lister accepts while it runs.')
     + qa('How does the deposit EMI work?', 'A lending partner pays the deposit to the lister. You repay the partner in monthly instalments. Homingle does not lend.')
     + qa('How do I report a broker?', 'Open the listing or chat, tap the menu and choose Report.') + '</div>')
@@ -2865,10 +2926,12 @@ function quickListing() {
     photos: [{ slot: 0, src: 'sunlit' }, { slot: 1, src: 'green_lounge' }, { slot: 2, src: 'compact_kitchen' }], guests: 'With notice', smoking: 'Not allowed', pets: 'No pets' });
   S.listing.draft = d; quickMe('lister'); publishListing();
 }
+// a room that is inside its wait right now (the named one if it still is)
+function earlyRoomFor(id) { function early(x) { var t = roomTag(ROOMS[x]); return !!t && t !== 'free'; } if (early(id)) return id; var ids = Object.keys(ROOMS).filter(function (x) { return early(x) && !S.interests[x] && !S.invites[x] && genderOk(ROOMS[x]) && ROOMS[x].respond; }); return ids[0] || id; }
 var SHORT = {
   feed: function () { quickMe('seeker'); home('SeekerHome'); },
   listing: function () { quickListing(); S.me.role = 'lister'; home('BrowseSeekers'); },
-  accepted: function () { quickMe('seeker'); if (S.me.pass) S.me.pass.until = Math.min(S.me.pass.until, now() - 1); S.interests.meera = { state: 'sent', at: now() - 5 * MIN, intro: '' }; EV.accept({ rid: 'meera' }); home('Interests'); },
+  accepted: function () { quickMe('seeker'); if (S.me.pass) S.me.pass.until = Math.min(S.me.pass.until, now() - 1); var er = earlyRoomFor('meera'); S.interests[er] = { state: 'sent', at: now() - 5 * MIN, intro: '' }; EV.accept({ rid: er }); home('Interests'); },
   paused: function () {
     quickMe('seeker'); if (S.me.pass) S.me.pass.until = Math.min(S.me.pass.until, now() - 1);
     S.interests.kiran = { state: 'accepted', at: now() - 3 * DAY, acceptedAt: now() - 3 * DAY, intro: '' };
@@ -2879,7 +2942,7 @@ var SHORT = {
   passEnded: function () { quickMe('seeker'); S.me.pass = { plan: 'd1', days: 1, at: now() - DAY - 5 * MIN, until: now() - 5 * MIN }; if (!S.me.payments.length) S.me.payments.unshift({ what: '1-day pass', amount: 99, at: now() - DAY - 5 * MIN, how: 'UPI', kind: 'pass' }); clockChecks(); home('Notifications'); },
   invite: function () { quickMe('seeker'); delete S.invites.priya; EV.invite({ rid: 'priya' }); home('Interests'); },
   featEnding: function () { quickListing(); S.me.role = 'lister'; var l = myListing(); l.feat = { at: now() - 4 * DAY - 2 * HOUR, until: now() + 22 * HOUR }; l.feats = [l.feat]; l.at = Math.min(l.at, now() - 5 * DAY); clockChecks(); home('Notifications'); },
-  featEnded: function () { quickListing(); S.me.role = 'lister'; var l = myListing(); l.at = Math.min(l.at, now() - 6 * DAY); l.feat = { at: now() - 5 * DAY - 5 * MIN, until: now() - 5 * MIN }; l.feats = [l.feat];
+  featEnded: function () { quickListing(); S.me.role = 'lister'; var l = myListing(); l.at = Math.min(l.at, now() - 5.4 * DAY); l.feat = { at: now() - 5 * DAY - 5 * MIN, until: now() - 5 * MIN }; l.feats = [l.feat];
     S.listing.applicants.rahul = { state: 'accepted', at: now() - 3 * DAY, acceptedAt: now() - 3 * DAY, seen: true }; cancelEv('applicant', function (x) { return x.pid === 'rahul'; }); var c = ensureChat('lister', 'rahul');
     if (!c.msgs.length) { c.msgs.push({ f: 'them', t: 'Hi, is the room still available?', at: now() - 2 * DAY }); c.msgs.push({ f: 'me', t: 'Yes, from the 1st. Do you want to see it?', at: now() - 2 * DAY + 4 * MIN }); c.at = now() - 2 * DAY; c.stage = 1; } c.wasOpen = true; clockChecks(); home('ChatList'); },
   boostEnded: function () { quickListing(); S.me.role = 'lister'; var l = myListing(); l.at = Math.min(l.at, now() - 4 * DAY); l.boost = { at: now() - 3 * DAY - 5 * MIN, until: now() - 5 * MIN }; l.boosts = [l.boost];
@@ -2900,20 +2963,20 @@ SCREENS.Tester = function () {
   var hasL = !!myListing();
   return page('night', topbar('Tester menu', '', 'x'), scroll(
     '<p class="p s">For the team. Testers do not see this menu. It is ' + dDay(now()) + ', ' + tClock(now()) + ' in the model' + (S.offset ? ' (moved forward ' + Math.round(S.offset / DAY) + ' days)' : '') + '.</p>'
-    + sec('Looking for a room', menu([row('search', 'Skip sign-up: land on the room feed', 'A ready profile, verified', 'shortcut', { k: 'feed' }), row('clock', 'A lister accepted me on an Early Bird room', 'Meera says yes. Chat waits for the date', 'shortcut', { k: 'accepted' }),
+    + sec('Looking for a room', menu([row('search', 'Skip sign-up: land on the room feed', 'A ready profile, verified', 'shortcut', { k: 'feed' }), row('clock', 'A lister accepted me on an Early Bird room', 'A lister says yes. Chat waits for the date', 'shortcut', { k: 'accepted' }),
       row('users', 'A lister invites me', 'Priya&#39;s invite arrives now', 'shortcut', { k: 'invite' }), row('chat', 'A chat that is paused', 'Kiran&#39;s Featured ended mid-conversation', 'shortcut', { k: 'paused' }),
       row('card', 'My pass ends tomorrow', '', 'shortcut', { k: 'passEnding' }), row('card', 'My pass has just ended', '', 'shortcut', { k: 'passEnded' })]))
     + sec('Having a room', menu([row('home', 'Skip the form: land with a live listing', 'HSR Layout, ₹12,000', 'shortcut', { k: 'listing' }), row('users', 'All applicants arrive now', '', 'shortcut', { k: 'applicants' }),
       row('star', 'Featured ends tomorrow', '', 'shortcut', { k: 'featEnding' }), row('star', 'Featured has ended, a chat is paused', '', 'shortcut', { k: 'featEnded' }), row('up', 'Boost has ended', 'With the results', 'shortcut', { k: 'boostEnded' }),
       row('home', 'My listing ends in 2 days', '', 'shortcut', { k: 'listEnding' }), row('home', 'My listing has expired', '', 'shortcut', { k: 'listExpired' })]))
-    + sec('Other people and time', menu([row('send', 'Make everyone who is waiting answer now', S.sched.length + ' answers waiting', 'flush'), row('cal', 'Jump forward 1 day', '', 'jump', { days: 1 }), row('cal', 'Jump forward 3 days', '', 'jump', { days: 3 }), row('cal', 'Jump forward 12 days', 'Every Early Bird date has passed', 'jump', { days: 12 })]))
+    + sec('Other people and time', menu([row('send', 'Make everyone who is waiting answer now', S.sched.length + ' answers waiting', 'flush'), row('cal', 'Jump forward 1 day', '', 'jump', { days: 1 }), row('cal', 'Jump forward 3 days', '', 'jump', { days: 3 }), row('cal', 'Jump forward ' + EB_DAYS + ' days', 'Every Early Bird date has passed', 'jump', { days: EB_DAYS })]))
     + sec('What goes wrong', '<div class="menu">' + sw('test.payFail', 'The next payment fails') + '<button class="mlink"' + at('set', { path: 'test.kyc', val: S.test.kyc === 'ok' ? 'pending' : S.test.kyc === 'pending' ? 'fail' : 'ok' }) + '><span class="col grow"><span class="b7">The next verification</span><span class="s13 mut">' + { ok: 'Succeeds', pending: 'Takes too long', fail: 'Fails' }[S.test.kyc] + '. Tap to change.</span></span></button>'
       + row('wifi', 'Offline screen', '', 'sys', { k: 'Offline' }) + row('x', 'Something went wrong', '', 'sys', { k: 'PopError' }) + row('lock', 'Logged out for security', '', 'sys', { k: 'PopSession' }) + row('up', 'Update required', '', 'sys', { k: 'PopUpdate' }) + row('home', 'A room I liked was filled', '', 'sys', { k: 'PopUnavailable' }) + row('search', 'An empty feed', 'Sets my area to Electronic City', 'sys', { k: 'empty' }) + '</div>')
     + sec('The record', menu([row('clock', 'Test session record', 'Time on each screen, backs, exits', 'go', { to: 'TestSession' }), row('trash', 'Start over as a new user', 'Clears everything on this phone', 'open', { to: 'PopStartOver' })])), 'wide'));
 };
 
 // ---------- the test record ----------
-var BUILD = 'build 6 · 11 Oct';
+var BUILD = 'build 7 · 12 Oct';
 var SCREEN_NAMES = {"Splash": "Splash", "Main": "Welcome", "Phone": "Mobile number", "Otp": "Enter the code", "Role": "Choose your role", "Setup": "Where are you looking?", "AskLocation": "Allow location", "SetupBudget": "Budget and move-in", "Lifestyle1": "Lifestyle, part 1", "Lifestyle2": "Lifestyle, part 2", "SeekerHome": "Explore rooms", "Search": "Change location", "Filters": "Filters", "FeedEmpty": "Explore, no results", "Listing": "Room details", "Gallery": "Photos", "Match": "Match breakdown", "Listing2": "Room details, second room", "Listing3": "Room details, daily limit reached", "Saved": "Saved rooms", "Kyc": "Verify with DigiLocker", "KycPending": "Verification pending", "KycFailed": "Verification failed", "ProfileBasics": "About you", "SendInterest": "Send interest", "InterestSent": "Interest sent", "AskNotifications": "Allow notifications", "PopInterestOffer": "Send interest: the pass offer", "InterestSentFree": "Interest sent, without a pass", "PopInterestLimit": "Pop-up: daily interest limit", "PassOffer": "Get a pass, before sending interest", "CheckoutOffer": "Pay for a pass, before sending interest", "PassActiveOffer": "Pass active, back to the interest", "SendInterest2": "Send interest, already verified", "InterestSent2": "Interest sent, second room", "Interests": "My interests", "Matched": "It's a match", "InviteListing": "Room you were invited to", "InviteAccepted": "Invite accepted", "SeekerPaywall": "Get a pass", "Checkout": "Payment", "PayFailed": "Payment failed", "PassActive": "Pass active", "MyPass": "Pass and payments", "ChatList": "Chats", "ChatEmpty": "Chats, empty", "ChatNew": "New chat, suggested questions", "Chat": "Chat", "ChatLocked": "Chat locked, pass ended", "ListerPublic": "Lister's profile, as a seeker sees it", "ShareNumber": "Share your number", "VisitPick": "Suggest a visit", "ChatVisit": "Chat, visit requested", "VisitConfirmed": "Visit details", "ReportBlock": "Report or block", "Reported": "Report sent", "Emi": "Deposit in EMIs", "EmiStatus": "Deposit EMI status", "AddListing": "Listing form 1: the flat", "AddFlatmates": "Listing form 3: who lives there", "AddFlatmate": "Add a flatmate", "AddPhotos": "Listing form 4: photos", "AddRules": "Listing form 5: house rules", "ListingPreview": "Listing preview", "BrowseSeekers": "Find a flatmate", "PeopleFilters": "Filters, people feed", "SeekerProfile": "Seeker profile", "InviteSent": "Invite sent", "PopInviteLimit": "Pop-up: daily invite limit", "Applicants": "Applicants", "Applicant": "Applicant profile", "ListerLocked": "Accepted, chat opens later", "ApplicantPass": "Applicant with a pass", "ApplicantAccepted": "Applicant accepted, chat open", "Shortlisted": "Shortlisted", "ListerChats": "Chats, lister", "ListerChat": "Chat thread, lister", "ListerChatSneha": "New chat, lister", "ListerChatLocked": "Locked chat, lister", "ListerShareNumber": "Share number, lister", "ListerVisit": "Visit details, lister", "ListerHome": "My listing", "EditListing": "Edit listing", "MarkFilled": "Mark as filled", "ListingExpired": "My listing, expired", "RenewListing": "Renew listing", "Promote": "Promote your listing", "ListerCheckout": "Pay for Featured", "PromoteDone": "Listing is Featured", "BoostCheckout": "Pay for Boost", "BoostDone": "Boost is live", "ListerHomeBoosted": "My listing, while boosted", "Profile": "Profile", "ListerProfile": "Profile, lister", "EditProfile": "Edit profile", "Notifications": "Notifications", "ListerNotifications": "Notifications, lister", "NotifPrefs": "Notification settings", "Privacy": "Privacy", "Blocked": "Blocked people", "Help": "Help", "Support": "Contact support", "SupportSent": "Support message sent", "DeleteAccount": "Delete account", "Offline": "Offline", "PopLogOut": "Pop-up: Log out", "PopDiscard": "Pop-up: Discard changes", "PopWithdraw": "Pop-up: Withdraw interest", "PopDecline": "Pop-up: Decline an applicant", "PopDeclineInvite": "Pop-up: Decline an invite", "PopBlock": "Pop-up: Block someone", "PopListerBlock": "Block an applicant", "PopCancelVisit": "Pop-up: Cancel a visit", "PopListerCancelVisit": "Cancel a visit, lister", "PopUnblock": "Unblock a person", "PopDataRequest": "Request your data", "PopDeleteAccount": "Pop-up: Delete account", "PopOneListing": "Pop-up: One listing rule", "PopUnavailable": "Pop-up: Room no longer available", "PopPartner": "Pop-up: Leaving for the lending partner", "PopSafety": "Pop-up: Payment safety warning", "PopPaying": "Pop-up: Confirming payment", "PopUpdate": "Pop-up: Update required", "PopSession": "Pop-up: Session expired", "PopError": "Pop-up: Something went wrong", "PopPhoto": "Pop-up: Photo source", "PopPhotoEdit": "Photo options, from edit profile", "PopSort": "Pop-up: Sort rooms", "PopChatMenu": "Pop-up: Chat menu", "PopListerChatMenu": "Chat menu, lister", "PopInvite": "Pop-up: Invite received", "PopNumberRequest": "Pop-up: Number request received", "PopVisitRequest": "Pop-up: Visit request received", "PopQuickPass": "Pop-up: Quick pass", "PopPassEnding": "Pop-up: Pass ending soon", "PopPassEnded": "Pop-up: Pass ended", "PopFeaturedEnding": "Pop-up: Featured ending soon", "PopBoostEnded": "Pop-up: Boost has ended", "PopListingEnding": "Pop-up: Listing ending soon", "PopPauseListing": "Pop-up: Pause listing", "PopAfterVisit": "Pop-up: After a visit", "PopToasts": "Pop-up: Toast messages", "KycSim": "DigiLocker stand-in page", "KycDone": "You are verified", "Person": "Person profile", "Visit": "Visit details", "TestSession": "Test record", "Tester": "Tester menu", "ListingOptions": "Before you list", "AddRoom": "Listing form 2: the room"};
 function sname(n) { return SCREEN_NAMES[n] ? SCREEN_NAMES[n] : n; }
 function fmtDur(ms) { var s = Math.round(ms / 1000); if (s < 60) return s + 's'; var m = Math.floor(s / 60); return m + 'm ' + (s % 60 < 10 ? '0' : '') + (s % 60) + 's'; }
